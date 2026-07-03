@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Navisync</title>
+
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@latest/dist/leaflet-routing-machine.css" />
+
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background-color: #f5f5f5;
+      color: #f8f8f2;
+    }
+
+    #map {
+      height: 80vh;
+      width: 100%;
+    }
+
+    .bottom-bar {
+      position: relative;
+      width: 100%;
+      background-color: #282a36;
+      padding: 10px;
+      display: flex;
+      flex-direction: row;
+      align-items: center;
+    }
+
+    .bottom-bar input {
+      margin: 5vw 5vw 0 5vw;
+      padding: 5px;
+      width: 80%;
+      border: 1px ;
+      border-radius: 4px;
+      background-color: #44475a;
+      border-style: solid ;
+      border-radius: 5vw;
+      border-color: #888;
+      color: #f8f8f2;  
+      padding: 2vh;
+    }
+
+    .bottom-bar input::placeholder {
+      color: #f8f8f2;
+    }
+
+    .transport-bar {
+      display: flex;
+      justify-content: center;
+      gap: 20px;
+      padding: 10px;
+      background-color: #282a36;
+    }
+
+    .transport-bar label {
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      color: #f8f8f2;
+    }
+
+    .autocomplete-suggestions {
+      position: absolute;
+      background: #44475a;
+      border: 1px solid #444;
+      color: #f8f8f2;
+      z-index: 1001;
+      max-height: 150px;
+      overflow-y: auto;
+      width: 100%;
+    }
+
+    .autocomplete-suggestions div {
+      padding: 8px;
+      cursor: pointer;
+    }
+
+    .autocomplete-suggestions div:hover {
+      background-color: #444;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="bottom-bar">
+    <input id="source" type="text" placeholder="Enter Source Location" autocomplete="off" />
+    <input id="destination" type="text" placeholder="Enter Destination Location" autocomplete="off" />
+  </div>
+
+  <div class="transport-bar">
+    <label><input type="radio" name="transport" value="cycling-regular" checked> 🚴 Bike</label>
+    <label><input type="radio" name="transport" value="driving-car"> 🚗 Car</label>
+  </div>
+
+  <div id="source-suggestions" class="autocomplete-suggestions"></div>
+  <div id="destination-suggestions" class="autocomplete-suggestions"></div>
+  <div id="map"></div>
+
+  <!-- Leaflet and Routing -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script>
+    const ORS_API_KEY = '5b3ce3597851110001cf6248dd5bac789d8a47fcbff6437c73c5bdf7';
+    const map = L.map('map').setView([22.5726, 88.3639], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: 'Team Noir'
+    }).addTo(map);
+
+    const markers = [];
+    let routePolyline = null;
+    let selectedMode = 'cycling-regular';
+
+    document.querySelectorAll('input[name="transport"]').forEach(input => {
+      input.addEventListener('change', () => {
+        selectedMode = input.value;
+        updateRoute();
+      });
+    });
+
+    function clearRoute() {
+      if (routePolyline) {
+        map.removeLayer(routePolyline);
+        routePolyline = null;
+      }
+    }
+
+    function getDistanceMatrix(coords) {
+      fetch(`https://api.openrouteservice.org/v2/matrix/${selectedMode}`, {
+        method: 'POST',
+        headers: {
+          'Authorization': ORS_API_KEY,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          locations: coords,
+          metrics: ['distance'],
+          units: 'm'
+        })
+      })
+      .then(res => res.json())
+      .then(data => {
+        const order = fuzzyNearestNeighbor(data.distances);
+        const orderedCoords = order.map(i => coords[i]);
+        drawRoute(orderedCoords);
+      })
+      .catch(err => console.error('Matrix error:', err));
+    }
+
+    function fuzzyNearestNeighbor(matrix) {
+      const n = matrix.length;
+      const visited = Array(n).fill(false);
+      const route = [0];
+      visited[0] = true;
+      for (let step = 1; step < n; step++) {
+        const last = route[route.length - 1];
+        let nearest = -1;
+        let minFuzzy = Infinity;
+        for (let i = 0; i < n; i++) {
+          if (!visited[i]) {
+            const d = matrix[last][i];
+            const a = d * 0.9;
+            const b = d;
+            const c = d * 1.1;
+            const fuzzyValue = (a + b + c) / 3 + Math.random() * ((c - a) / 3);
+            if (fuzzyValue < minFuzzy) {
+              minFuzzy = fuzzyValue;
+              nearest = i;
+            }
+          }
+        }
+        visited[nearest] = true;
+        route.push(nearest);
+      }
+      return route;
+    }
+
+    function drawRoute(coords) {
+      fetch(`https://api.openrouteservice.org/v2/directions/${selectedMode}/geojson`, {
+        method: 'POST',
+        headers: {
+          'Authorization': ORS_API_KEY,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ coordinates: coords })
+      })
+      .then(res => res.json())
+      .then(data => {
+        clearRoute();
+        routePolyline = L.geoJSON(data, {
+          style: { color: selectedMode === 'cycling-regular' ? 'red' : 'blue', weight: 5 }
+        }).addTo(map);
+      })
+      .catch(err => console.error('Route error:', err));
+    }
+
+    map.on('click', function (e) {
+      const marker = L.marker(e.latlng).addTo(map);
+      markers.push(marker);
+      marker.on('click', function () {
+        map.removeLayer(marker);
+        const index = markers.indexOf(marker);
+        if (index > -1) markers.splice(index, 1);
+        updateRoute();
+      });
+      updateRoute();
+    });
+
+    function updateRoute() {
+      if (markers.length >= 2) {
+        const coords = markers.map(m => [m.getLatLng().lng, m.getLatLng().lat]);
+        getDistanceMatrix(coords);
+      } else {
+        clearRoute();
+      }
+    }
+
+    function setupAutocomplete(input, suggestionBox, label) {
+      input.addEventListener('input', () => {
+        const query = input.value;
+        if (query.length < 1) {
+          suggestionBox.innerHTML = '';
+          return;
+        }
+
+        fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${query}`)
+          .then(res => res.json())
+          .then(data => {
+            suggestionBox.innerHTML = '';
+            data.forEach(place => {
+              const div = document.createElement('div');
+              div.textContent = place.display_name;
+              div.addEventListener('click', () => {
+                input.value = place.display_name;
+                suggestionBox.innerHTML = '';
+                const latlng = L.latLng(place.lat, place.lon);
+                const marker = L.marker(latlng).addTo(map).bindPopup(`${label}: ${place.display_name}`).openPopup();
+                marker.on('click', function () {
+                  map.removeLayer(marker);
+                  const index = markers.indexOf(marker);
+                  if (index > -1) markers.splice(index, 1);
+                  updateRoute();
+                });
+                markers.push(marker);
+                updateRoute();
+              });
+              suggestionBox.appendChild(div);
+            });
+          });
+      });
+
+      document.addEventListener('click', e => {
+        if (!suggestionBox.contains(e.target) && e.target !== input) {
+          suggestionBox.innerHTML = '';
+        }
+      });
+    }
+
+    setupAutocomplete(document.getElementById('source'), document.getElementById('source-suggestions'), 'Source');
+    setupAutocomplete(document.getElementById('destination'), document.getElementById('destination-suggestions'), 'Destination');
+  </script>
+</body>
+</html>
